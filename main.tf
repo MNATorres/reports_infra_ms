@@ -71,29 +71,31 @@ resource "aws_iam_role_policy_attachment" "lambda_s3_attach" {
   policy_arn = aws_iam_policy.lambda_s3_write_policy.arn
 }
 
-# 5. CREAMOS UN ARCHIVO ZIP PERLA (Temporal, para que Terraform cree la Lambda)
-# AWS exige subir un .zip. Usamos este truco para meter un archivo básico por ahora.
-data "archive_file" "lambda_zip_temporal" {
-  type        = "zip"
-  output_path = "${path.module}/lambda_dummy.zip"
-
-  source {
-    content  = "exports.handler = async (event) => { return { statusCode: 200, body: 'Hola Mundo' } };"
-    filename = "index.js"
-  }
+# 5. EMPAQUETADO AUTOMÁTICO DE LA CARPETA REAL
+# Reemplazamos el "source" que creaba un string por "source_dir" apuntando a tu nueva carpeta
+data "archive_file" "lambda_zip_real" {
+  type = "zip"
+  # El "../" le dice a Terraform que suba un nivel en el árbol de carpetas
+  source_dir  = "${path.module}/../pdf_generator_employees"
+  output_path = "${path.module}/pdf_generator_employees.zip"
 }
 
-# 6. CREAMOS LA FUNCIÓN LAMBDA EN AWS
+# 6. ACTUALIZACIÓN DE LA FUNCIÓN LAMBDA
 resource "aws_lambda_function" "generador_pdf_lambda" {
-  filename         = data.archive_file.lambda_zip_temporal.output_path
-  function_name    = "generador-reportes-pdf"
-  role             = aws_iam_role.lambda_reportes_role.arn
-  handler          = "index.handler"
-  runtime          = "nodejs18.x"
-  source_code_hash = data.archive_file.lambda_zip_temporal.output_base64sha256
+  filename      = data.archive_file.lambda_zip_real.output_path
+  function_name = "generador-reportes-pdf"
+  role          = aws_iam_role.lambda_reportes_role.arn
+  handler       = "index.handler" # Va a buscar index.js -> exports.handler dentro de pdf_generator_employees
+  runtime       = "nodejs18.x"
 
-  # Le pasamos el nombre del bucket como variable de entorno a la Lambda
-  # para que el código Node.js sepa a dónde subir el archivo más adelante
+  # Esta línea es clave: calcula el hash del ZIP. Si cambiás el código Node, 
+  # el hash cambia y Terraform sabe que tiene que subir la nueva versión.
+  source_code_hash = data.archive_file.lambda_zip_real.output_base64sha256
+
+  # Le aumentamos el timeout a 30 segundos (por defecto son 3) porque generar 
+  # un PDF y subirlo a S3 puede tomar un par de segundos.
+  timeout = 30
+
   environment {
     variables = {
       BUCKET_NAME = aws_s3_bucket.bucket_reportes.id
