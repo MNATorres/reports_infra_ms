@@ -22,6 +22,36 @@ resource "aws_s3_bucket" "bucket_reportes" {
   }
 }
 
+# A. DESACTIVAMOS EL BLOQUEO DE ACCESO PÚBLICO DEL BUCKET
+resource "aws_s3_bucket_public_access_block" "public_block" {
+  bucket = aws_s3_bucket.bucket_reportes.id
+
+  block_public_acls       = false
+  block_public_policy     = false
+  ignore_public_acls      = false
+  restrict_public_buckets = false
+}
+
+# B. CREAMOS UNA POLÍTICA PARA QUE CUALQUIERA PUEDA LEER LOS OBJETOS (GetObject)
+resource "aws_s3_bucket_policy" "politica_lectura_publica" {
+  # Nos aseguramos de que primero se remueva el bloqueo público antes de aplicar la política
+  depends_on = [aws_s3_bucket_public_access_block.public_block]
+  bucket     = aws_s3_bucket.bucket_reportes.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid       = "PublicReadGetObject"
+        Effect    = "Allow"
+        Principal = "*" # Significa: "Cualquier persona en internet"
+        Action    = "s3:GetObject"
+        Resource  = "${aws_s3_bucket.bucket_reportes.arn}/*" # Aplica a todos los archivos dentro
+      }
+    ]
+  })
+}
+
 # 2. CREAMOS EL ROL DE IAM PARA LA LAMBDA
 resource "aws_iam_role" "lambda_reportes_role" {
   name = "lambda_reportes_role"
@@ -58,7 +88,6 @@ resource "aws_iam_policy" "lambda_s3_write_policy" {
           "s3:PutObject",
           "s3:PutObjectAcl"
         ]
-        # Acá se conectan mágicamente: usamos el ARN del recurso de arriba
         Resource = "${aws_s3_bucket.bucket_reportes.arn}/*"
       }
     ]
@@ -72,10 +101,8 @@ resource "aws_iam_role_policy_attachment" "lambda_s3_attach" {
 }
 
 # 5. EMPAQUETADO AUTOMÁTICO DE LA CARPETA REAL
-# Reemplazamos el "source" que creaba un string por "source_dir" apuntando a tu nueva carpeta
 data "archive_file" "lambda_zip_real" {
-  type = "zip"
-  # El "../" le dice a Terraform que suba un nivel en el árbol de carpetas
+  type        = "zip"
   source_dir  = "${path.module}/../pdf_generator_employees"
   output_path = "${path.module}/pdf_generator_employees.zip"
 }
@@ -85,16 +112,11 @@ resource "aws_lambda_function" "generador_pdf_lambda" {
   filename      = data.archive_file.lambda_zip_real.output_path
   function_name = "generador-reportes-pdf"
   role          = aws_iam_role.lambda_reportes_role.arn
-  handler       = "index.handler" # Va a buscar index.js -> exports.handler dentro de pdf_generator_employees
+  handler       = "index.handler"
   runtime       = "nodejs18.x"
 
-  # Esta línea es clave: calcula el hash del ZIP. Si cambiás el código Node, 
-  # el hash cambia y Terraform sabe que tiene que subir la nueva versión.
   source_code_hash = data.archive_file.lambda_zip_real.output_base64sha256
-
-  # Le aumentamos el timeout a 30 segundos (por defecto son 3) porque generar 
-  # un PDF y subirlo a S3 puede tomar un par de segundos.
-  timeout = 30
+  timeout          = 30
 
   environment {
     variables = {
